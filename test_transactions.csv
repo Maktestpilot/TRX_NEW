@@ -1,0 +1,11 @@
+id,user_email,amount,created_at,ip,client_ip,billing_country,body
+1,john.doe@example.com,5000,2025-01-27 10:00:00,31.0.95.177,,RO,"{'email': 'john.doe@example.com', 'billing': {'country': 'RO', 'city': 'Bucharest'}}"
+2,jane.smith@example.com,2000,2025-01-27 10:05:00,2.37.164.197,,IT,"{'email': 'jane.smith@example.com', 'billing': {'country': 'IT', 'city': 'Rome'}}"
+3,john.doe@example.com,470,2025-01-27 10:10:00,31.0.95.177,,RO,"{'email': 'john.doe@example.com', 'billing': {'country': 'RO', 'city': 'Bucharest'}}"
+4,john.doe@example.com,1978,2025-01-27 10:15:00,31.0.95.177,,RO,"{'email': 'john.doe@example.com', 'billing': {'country': 'RO', 'city': 'Bucharest'}}"
+5,alice@example.com,1000,2025-01-27 10:20:00,8.8.8.8,,US,"{'email': 'alice@example.com', 'billing': {'country': 'US', 'city': 'New York'}}"
+6,bob@example.com,1500,2025-01-27 10:25:00,1.1.1.1,,AU,"{'email': 'bob@example.com', 'billing': {'country': 'AU', 'city': 'Sydney'}}"
+7,john.doe@example.com,5000,2025-01-27 10:30:00,31.0.95.177,,RO,"{'email': 'john.doe@example.com', 'billing': {'country': 'RO', 'city': 'Bucharest'}}"
+8,john.doe@example.com,3000,2025-01-27 10:35:00,31.0.95.177,,RO,"{'email': 'john.doe@example.com', 'billing': {'country': 'RO', 'city': 'Bucharest'}}"
+9,john.doe@example.com,2500,2025-01-27 10:40:00,31.0.95.177,,RO,"{'email': 'john.doe@example.com', 'billing': {'country': 'RO', 'city': 'Bucharest'}}"
+10,john.doe@example.com,4000,2025-01-27 10:45:00,31.0.95.177,,RO,"{'email': 'john.doe@example.com', 'billing': {'country': 'RO', 'city': 'Bucharest'}}"
