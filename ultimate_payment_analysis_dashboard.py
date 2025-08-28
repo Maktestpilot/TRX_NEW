@@ -39,7 +39,7 @@ def init_ipinfo_geolocator():
 # Page configuration
 st.set_page_config(
     page_title="Ultimate Payment Analysis Dashboard",
-    page_icon="💰",
+    page_icon="🚀",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -79,11 +79,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-def load_and_process_data(uploaded_file) -> pd.DataFrame:
-    """Load and process uploaded CSV file"""
+def load_and_process_data(df, ip_mapping_file=None, mmdb_file=None, ipinfo_geolocator=None) -> pd.DataFrame:
+    """Process uploaded CSV file with additional data enrichment"""
     try:
-        df = pd.read_csv(uploaded_file)
-        
         # Basic data cleaning
         if 'created_at' in df.columns:
             df['created_at'] = pd.to_datetime(df['created_at'])
@@ -107,6 +105,12 @@ def load_and_process_data(uploaded_file) -> pd.DataFrame:
         elif 'created_at' in df.columns:
             # If only created_at exists, create a dummy processing_time column
             df['processing_time'] = np.random.uniform(1, 30, len(df))  # Random values for testing
+        
+        # Enrich with IP geolocation if available
+        if ipinfo_geolocator and 'ip_address' in df.columns:
+            df['ip_country'] = df['ip_address'].apply(lambda x: ipinfo_geolocator.get_country(x) if pd.notna(x) else 'Unknown')
+            df['ip_country_name'] = df['ip_address'].apply(lambda x: ipinfo_geolocator.get_country_name(x) if pd.notna(x) else 'Unknown')
+            df['ip_asn'] = df['ip_address'].apply(lambda x: ipinfo_geolocator.get_asn(x) if pd.notna(x) else 'Unknown')
         
         return df
     except Exception as e:
@@ -246,7 +250,7 @@ def safe_dataframe_display(df, max_rows=10):
     """Safely display DataFrame with PyArrow compatibility"""
     try:
         if df is None or df.empty:
-            return False
+            return pd.DataFrame()  # Return empty DataFrame instead of False
         
         # Convert to displayable format
         if hasattr(df, 'index') and not df.index.equals(pd.RangeIndex(start=0, stop=len(df))):
@@ -259,16 +263,30 @@ def safe_dataframe_display(df, max_rows=10):
             if display_df[col].dtype == 'object':
                 # Convert object columns to string to avoid PyArrow issues
                 display_df[col] = display_df[col].astype(str)
+            elif display_df[col].dtype == 'datetime64[ns]':
+                # Convert datetime to string to avoid PyArrow issues
+                display_df[col] = display_df[col].dt.strftime('%Y-%m-%d %H:%M:%S')
+            elif display_df[col].dtype == 'timedelta64[ns]':
+                # Convert timedelta to string to avoid PyArrow issues
+                display_df[col] = display_df[col].astype(str)
+        
+        # Handle any remaining problematic columns
+        for col in display_df.columns:
+            try:
+                # Test if column can be converted to string
+                display_df[col].astype(str)
+            except:
+                # If conversion fails, replace with placeholder
+                display_df[col] = 'Data Error'
         
         # Limit rows for display
         display_df = display_df.head(max_rows)
         
-        st.dataframe(display_df)
-        return True
+        return display_df  # Return the processed DataFrame instead of calling st.dataframe
         
     except Exception as e:
         st.warning(f"Data display error: {str(e)}")
-        return False
+        return pd.DataFrame()  # Return empty DataFrame on error
 
 def create_geographic_analysis(df: pd.DataFrame) -> Dict[str, Any]:
     """Enhanced geographic analysis with bin country and IP correlation"""
@@ -1077,26 +1095,32 @@ def create_enhanced_charts(df: pd.DataFrame, analysis_results: Dict[str, Any]) -
             ip_data = geo_analysis['ip_country_success']
             
             if not bin_data.empty and not ip_data.empty:
-                # Combine data for comparison
-                comparison_data = pd.DataFrame({
-                    'Bin_Country_Success': bin_data[('is_successful', 'mean')],
-                    'IP_Country_Success': ip_data[('is_successful', 'mean')]
-                }).fillna(0)
-                
-                # Reset index to make it a proper DataFrame
-                comparison_data = comparison_data.reset_index()
-                comparison_data.columns = ['Country', 'Bin_Country_Success', 'IP_Country_Success']
-                
-                fig = px.scatter(
-                    data_frame=comparison_data,
-                    x='Bin_Country_Success',
-                    y='IP_Country_Success',
-                    title="Bin Country vs IP Country Success Rate Correlation",
-                    labels={'Bin_Country_Success': 'Bin Country Success Rate', 'IP_Country_Success': 'IP Country Success Rate'},
-                    text='Country'
-                )
-                fig.update_layout(xaxis_tickformat='.1%', yaxis_tickformat='.1%')
-                charts['bin_ip_correlation'] = fig
+                try:
+                    # Get common countries to avoid length mismatch
+                    bin_countries = set(bin_data.index)
+                    ip_countries = set(ip_data.index)
+                    common_countries = list(bin_countries.intersection(ip_countries))
+                    
+                    if len(common_countries) > 0:
+                        # Create comparison data only for common countries
+                        comparison_data = pd.DataFrame({
+                            'Country': common_countries,
+                            'Bin_Country_Success': [bin_data.loc[country, ('is_successful', 'mean')] for country in common_countries],
+                            'IP_Country_Success': [ip_data.loc[country, ('is_successful', 'mean')] for country in common_countries]
+                        }).fillna(0)
+                        
+                        fig = px.scatter(
+                            data_frame=comparison_data,
+                            x='Bin_Country_Success',
+                            y='IP_Country_Success',
+                            title="Bin Country vs IP Country Success Rate Correlation",
+                            labels={'Bin_Country_Success': 'Bin Country Success Rate', 'IP_Country_Success': 'IP Country Success Rate'},
+                            text='Country'
+                        )
+                        fig.update_layout(xaxis_tickformat='.1%', yaxis_tickformat='.1%')
+                        charts['bin_ip_correlation'] = fig
+                except Exception as e:
+                    st.warning(f"Could not create bin-IP correlation chart: {str(e)}")
         
         # 3. Enhanced User Risk Segmentation Chart
         if 'user_segments' in user_analysis:
@@ -1241,790 +1265,327 @@ def display_ip_details(ip_address: str, geolocator) -> None:
         st.write("**Location:** IPinfo database not available")
 
 def main():
-    st.markdown('<h1 class="main-header">💰 Ultimate Payment Analysis Dashboard</h1>', unsafe_allow_html=True)
+    st.title("🚀 Ultimate Payment Analysis Dashboard")
+    st.markdown("**Comprehensive fraud detection, payment analysis, and geographic intelligence with IPinfo integration**")
     
-    # Initialize IPinfo and show status
-    geolocator = init_ipinfo_geolocator()
-    if geolocator:
-        st.success("🌍 IPinfo database loaded - Enhanced geographic analysis available")
-    else:
-        st.warning("⚠️ IPinfo database not available - Using fallback geographic analysis")
+    # Initialize IPinfo bundle geolocator once
+    ipinfo_geolocator = init_ipinfo_geolocator()
     
-    # File upload
-    uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+    # Initialize session state for data storage
+    if 'df' not in st.session_state:
+        st.session_state.df = None
+    if 'ipinfo_geolocator' not in st.session_state:
+        st.session_state.ipinfo_geolocator = None
+    if 'data_loaded' not in st.session_state:
+        st.session_state.data_loaded = False
     
+    # Sidebar configuration
+    st.sidebar.header("Configuration")
+    
+    # File upload - only once
+    st.header("📁 Data Upload")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        uploaded_file = st.file_uploader(
+            "Основной CSV (JOIN pt × ci × t × ap)",
+            type=['csv'],
+            help="Upload your transaction CSV file for analysis"
+        )
+    
+    with col2:
+        ip_mapping_file = st.file_uploader(
+            "Опционально: готовый мэппинг IP→Country (ip, country)",
+            type=['csv'],
+            help="Optional IP to country mapping file"
+        )
+    
+    # IPinfo MMDB database upload
+    st.subheader("🌐 IP Geolocation Database")
+    mmdb_file = st.file_uploader(
+        "Опционально: база IPinfo MMDB (например, ipinfo_lite.mmdb)",
+        type=['mmdb'],
+        help="Upload IPinfo MMDB database for IP geolocation"
+    )
+    
+    # Global data storage
+    if 'df' not in st.session_state:
+        st.session_state.df = None
+    if 'ipinfo_geolocator' not in st.session_state:
+        st.session_state.ipinfo_geolocator = None
+    
+    # Load and process data only once
     if uploaded_file is not None:
-        # Load and process data
-        df = load_and_process_data(uploaded_file)
-        
-        if not df.empty:
-            st.success(f"✅ Data loaded successfully! {len(df)} transactions processed.")
-            
-            # Sidebar for IP analysis
-            st.sidebar.header("🔍 IP Address Analysis")
-            
-            # IP search
-            if 'ip_address' in df.columns:
-                unique_ips = df['ip_address'].dropna().unique()
-                if len(unique_ips) > 0:
-                    selected_ip = st.sidebar.selectbox(
-                        "Select IP Address for Analysis",
-                        options=[''] + list(unique_ips),
-                        index=0
-                    )
-                    
-                    if selected_ip:
-                        st.sidebar.subheader("IP Details")
-                        display_ip_details(selected_ip, geolocator)
-                        
-                        # Show transactions from this IP
-                        ip_transactions = df[df['ip_address'] == selected_ip]
-                        st.sidebar.write(f"**Transactions from this IP:** {len(ip_transactions)}")
-                        
-                        if len(ip_transactions) > 0:
-                            st.sidebar.write("**Success Rate:**", format_percentage(ip_transactions['is_successful'].mean()))
-                            if 'amount' in ip_transactions.columns:
-                                st.sidebar.write("**Total Amount:**", f"${ip_transactions['amount'].sum():.2f}")
-            
-            # Display basic statistics
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Total Transactions", len(df))
-            with col2:
-                success_rate = df['is_successful'].mean()
-                st.metric("Success Rate", format_percentage(success_rate))
-            with col3:
-                if 'amount' in df.columns:
-                    avg_amount = df['amount'].mean()
-                    st.metric("Average Amount", f"${avg_amount:.2f}")
-            with col4:
-                if 'processing_time' in df.columns:
-                    avg_time = df['processing_time'].mean()
-                    st.metric("Avg Processing Time", f"{avg_time:.1f}s")
-            
-            # Run all analyses
-            st.header("🔍 Comprehensive Analysis Results")
-            
-            # 1. Enhanced Geographic Analysis
-            st.subheader("🌍 Enhanced Geographic Pattern Analysis")
-            geo_analysis = create_geographic_analysis(df)
-            
-            # Display multiple geographic analyses
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                if 'billing_country_success' in geo_analysis:
-                    st.write("**Success Rate by Billing Country**")
-                    geo_data = geo_analysis['billing_country_success']
-                    display_data = geo_data[['success_rate_pct', 'total_transactions', 'successful_transactions', 'performance_rank']].head(10)
-                    st.dataframe(display_data)
-                
-                if 'bin_country_success' in geo_analysis:
-                    st.write("**Success Rate by Card BIN Country**")
-                    bin_data = geo_analysis['bin_country_success']
-                    display_data = bin_data[['success_rate_pct', 'total_transactions', 'successful_transactions']].head(10)
-                    st.dataframe(display_data)
-            
-            with col2:
-                if 'ip_country_success' in geo_analysis:
-                    st.write("**Success Rate by IP Address Country**")
-                    ip_data = geo_analysis['ip_country_success']
-                    display_data = ip_data[['success_rate_pct', 'total_transactions', 'successful_transactions']].head(10)
-                    st.dataframe(display_data)
-                
-                if 'country_match_analysis' in geo_analysis:
-                    st.write("**Success Rate by Country Match Status**")
-                    match_data = geo_analysis['country_match_analysis']
-                    display_data = match_data[['success_rate_pct', 'total_transactions', 'successful_transactions']]
-                    st.dataframe(display_data)
-            
-            # Display geographic insights
-            geo_insights = generate_insights_and_logic("Geographic Pattern Analysis", df, geo_analysis)
-            st.markdown(geo_insights)
-            
-            # Display additional IPinfo analysis
-            if 'asn_success' in geo_analysis:
-                st.write("**ASN Performance Analysis**")
-                asn_data = geo_analysis['asn_success'][['success_rate_pct', 'total_transactions', 'successful_transactions']].head(10)
-                st.dataframe(asn_data)
-            
-            if 'asn_risk_ranking' in geo_analysis:
-                st.write("**ASN Risk Ranking**")
-                asn_risk_data = geo_analysis['asn_risk_ranking'][['is_successful', 'id', 'risk_score']].head(10)
-                st.dataframe(asn_risk_data)
-            
-            if 'ip_risk_analysis' in geo_analysis:
-                st.write("**IP Risk Analysis**")
-                ip_risk_data = geo_analysis['ip_risk_analysis']
-                st.write(f"**High Risk IPs:** {len(ip_risk_data['high_risk_ips'])}")
-                if ip_risk_data['high_risk_ips']:
-                    st.write("**High Risk IP Addresses:**")
-                    for ip in ip_risk_data['high_risk_ips'][:10]:  # Show first 10
-                        st.write(f"- {ip}")
-                
-                st.write("**Risk Distribution:**")
-                risk_dist = pd.DataFrame(list(ip_risk_data['risk_distribution'].items()), columns=['Risk Factors', 'Count'])
-                st.dataframe(risk_dist)
-            
-            # 2. Enhanced User Behavior Analysis
-            st.subheader("👤 Enhanced User Behavior Analysis")
-            user_analysis = create_user_behavior_analysis(df)
-            
-            # Display multiple user behavior analyses
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                if 'user_patterns' in user_analysis:
-                    st.write("**User Transaction Patterns**")
-                    user_data = user_analysis['user_patterns'][['success_rate_pct', 'total_transactions', 'successful_count', 'risk_score']].head(10)
-                    st.dataframe(user_data)
-                
-                if 'user_segments' in user_analysis:
-                    st.write("**User Risk Segmentation**")
-                    segment_data = user_analysis['user_segments'][['success_rate_pct', 'total_transactions', 'risk_score']]
-                    st.dataframe(segment_data)
-            
-            with col2:
-                if 'user_behavior_patterns' in user_analysis:
-                    st.write("**User Behavior Patterns**")
-                    behavior_data = user_analysis['user_behavior_patterns'][['success_rate_pct', 'risk_score', 'avg_time_between_txns', 'txn_frequency']].head(10)
-                    st.dataframe(behavior_data)
-            
-            # Display user behavior insights
-            user_insights = generate_insights_and_logic("User Behavior Analysis", df, user_analysis)
-            st.markdown(user_insights)
-            
-            # 3. Enhanced Payment Method Analysis
-            st.subheader("💳 Enhanced Payment Method Analysis")
-            payment_analysis = create_payment_method_analysis(df)
-            
-            # Display multiple payment method analyses
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                if 'gateway_analysis' in payment_analysis:
-                    st.write("**Gateway Performance**")
-                    gateway_data = payment_analysis['gateway_analysis'][['success_rate_pct', 'total_transactions', 'successful_transactions', 'performance_rank']]
-                    st.dataframe(gateway_data)
-                
-                if 'card_type_analysis' in payment_analysis:
-                    st.write("**Card Type Performance**")
-                    card_data = payment_analysis['card_type_analysis'][['success_rate_pct', 'total_transactions', 'successful_transactions', 'performance_rank']]
-                    st.dataframe(card_data)
-            
-            with col2:
-                if 'gateway_card_analysis' in payment_analysis:
-                    st.write("**Gateway-Card Combination Performance**")
-                    combo_data = payment_analysis['gateway_card_analysis'][['success_rate_pct', 'total_transactions', 'successful_transactions']].head(10)
-                    st.dataframe(combo_data)
-                
-                if 'gateway_risk_analysis' in payment_analysis:
-                    st.write("**Gateway Risk Analysis**")
-                    risk_data = payment_analysis['gateway_risk_analysis'][['is_successful', 'risk_score']]
-                    st.dataframe(risk_data)
-            
-            # Display payment method insights
-            payment_insights = generate_insights_and_logic("Payment Method Analysis", df, payment_analysis)
-            st.markdown(payment_insights)
-            
-            # 4. Enhanced Temporal Analysis
-            st.subheader("⏰ Enhanced Temporal Pattern Analysis")
-            temporal_analysis = create_temporal_analysis(df)
-            
-            # Display multiple temporal analyses
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                if 'hourly_patterns' in temporal_analysis:
-                    st.write("**Success Rate by Hour**")
-                    hourly_data = temporal_analysis['hourly_patterns'][['success_rate_pct', 'total_transactions', 'successful_transactions', 'performance_rank']]
-                    st.dataframe(hourly_data)
-                
-                if 'day_of_week_patterns' in temporal_analysis:
-                    st.write("**Success Rate by Day of Week**")
-                    dow_data = temporal_analysis['day_of_week_patterns'][['success_rate_pct', 'total_transactions', 'successful_transactions', 'performance_rank']]
-                    st.dataframe(dow_data)
-            
-            with col2:
-                if 'monthly_patterns' in temporal_analysis:
-                    st.write("**Success Rate by Month**")
-                    monthly_data = temporal_analysis['monthly_patterns'][['success_rate_pct', 'total_transactions', 'successful_transactions']]
-                    st.dataframe(monthly_data)
-                
-                if 'high_risk_hours' in temporal_analysis:
-                    st.write("**High Risk Hours (< 50% Success)**")
-                    risk_data = temporal_analysis['high_risk_hours'][['success_rate_pct', 'total_transactions', 'successful_transactions']]
-                    st.dataframe(risk_data)
-            
-            # Display temporal insights
-            temporal_insights = generate_insights_and_logic("Temporal Pattern Analysis", df, temporal_analysis)
-            st.markdown(temporal_insights)
-            
-            # 5. Enhanced Advanced Body Content Analysis
-            st.subheader("🔍 Enhanced Advanced Body Content Analysis")
-            try:
-                body_analysis = run_advanced_body_analysis(df)
-                
-                # Display body analysis results in organized format
-                if body_analysis:
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        if 'browser_analysis' in body_analysis:
-                            st.write("**🌐 Browser & Device Impact**")
-                            browser_data = body_analysis['browser_analysis']
-                            if 'browser_success_rates' in browser_data:
-                                safe_dataframe_display(browser_data['browser_success_rates'], max_rows=10)
-                    
-                    with col2:
-                        if 'synthetic_detection' in body_analysis:
-                            st.write("**🤖 Synthetic Data Detection**")
-                            synthetic_data = body_analysis['synthetic_detection']
-                            if 'synthetic_indicators' in synthetic_data:
-                                safe_dataframe_display(synthetic_data['synthetic_indicators'], max_rows=10)
-                
-                # Display comprehensive body insights
+        if st.session_state.df is None or st.button("🔄 Reload Data"):
+            with st.spinner("Loading and processing data..."):
                 try:
-                    body_insights = generate_body_insights(body_analysis)
-                    st.markdown(body_insights)
-                except NameError:
-                    # If generate_body_insights is not available, create a basic version
-                    st.markdown("## 🔍 **Advanced Body Content Analysis Insights**\n\n")
-                    if body_analysis and 'browser_analysis' in body_analysis:
-                        st.markdown("**Browser & Device Impact Analysis Completed**\n")
-                        st.markdown("This analysis examines how browser types, device characteristics, and user agent information affect transaction success rates.\n")
-                    if body_analysis and 'synthetic_detection' in body_analysis:
-                        st.markdown("**Synthetic Data Detection Completed**\n")
-                        st.markdown("This analysis identifies potential synthetic or automated transaction patterns.\n")
-                
-                # Add Advanced Body Visualizations
-                try:
-                    st.subheader("🎨 Advanced Body Analysis Visualizations")
-                    # Import the function dynamically to avoid conflicts
-                    try:
-                        from advanced_body_visualizations import create_body_analysis_visualizations
-                        body_charts = create_body_analysis_visualizations(df, body_analysis)
-                    except ImportError:
-                        st.info("Advanced body visualizations module not available")
-                        body_charts = {}
+                    # Load CSV data
+                    df = pd.read_csv(uploaded_file)
+                    st.success(f"✅ Data loaded: {len(df)} transactions")
                     
-                    if body_charts:
-                        # Display charts in organized layout
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            if 'browser_geo_heatmap' in body_charts:
-                                st.plotly_chart(body_charts['browser_geo_heatmap'], use_container_width=True)
-                            if 'speed_success_analysis' in body_charts:
-                                st.plotly_chart(body_charts['speed_success_analysis'], use_container_width=True)
-                        
-                        with col2:
-                            if 'synthetic_risk_distribution' in body_charts:
-                                st.plotly_chart(body_charts['synthetic_risk_distribution'], use_container_width=True)
-                            if 'geographic_mismatch_analysis' in body_charts:
-                                st.plotly_chart(body_charts['geographic_mismatch_analysis'], use_container_width=True)
-                        
-                        # Full-width charts
-                        if 'time_speed_success_3d' in body_charts:
-                            st.plotly_chart(body_charts['time_speed_success_3d'], use_container_width=True)
-                        if 'combined_risk_analysis' in body_charts:
-                            st.plotly_chart(body_charts['combined_risk_analysis'], use_container_width=True)
-                        if 'factor_correlations_heatmap' in body_charts:
-                            st.plotly_chart(body_charts['factor_correlations_heatmap'], use_container_width=True)
-                        if 'suspicious_patterns_chart' in body_charts:
-                            st.plotly_chart(body_charts['suspicious_patterns_chart'], use_container_width=True)
+                    # Process data
+                    df = load_and_process_data(df, ip_mapping_file, mmdb_file, ipinfo_geolocator)
+                    
+                    # Store in session state
+                    st.session_state.df = df
+                    st.session_state.ipinfo_geolocator = ipinfo_geolocator
+                    st.session_state.data_loaded = True
                     
                 except Exception as e:
-                    st.warning(f"Advanced body visualizations not available: {str(e)}")
-                    st.info("This feature requires the advanced_body_visualizations module.")
-                
-            except Exception as e:
-                st.error(f"Error in advanced body analysis: {str(e)}")
-                st.info("This analysis requires the advanced_body_analysis module to be properly configured.")
+                    st.error(f"Error loading data: {e}")
+                    st.exception(e)
+                    return
+        
+        # Use stored data from session state
+        df = st.session_state.df
+        ipinfo_geolocator = st.session_state.ipinfo_geolocator
+        
+        if df is not None and len(df) > 0:
+            # Display data overview
+            # Display data overview
+            st.subheader("📊 Data Overview")
+            col1, col2, col3 = st.columns(3)
             
-            # 5.5. Geographic Intelligence Analysis
-            st.subheader("🌍 Geographic Intelligence Analysis")
+            with col1:
+                st.metric("Total Transactions", len(df))
+                st.metric("Successful", df['is_successful'].sum() if 'is_successful' in df.columns else 0)
             
-            # Prepare data for geographic analysis
-            df = prepare_data_for_geographic_analysis(df)
+            with col2:
+                st.metric("Failed", (~df['is_successful']).sum() if 'is_successful' in df.columns else 0)
+                success_rate = df['is_successful'].mean() if 'is_successful' in df.columns else 0
+                st.metric("Success Rate", f"{success_rate:.1%}")
             
-            try:
-                geographic_analysis = run_geographic_intelligence_analysis(df)
-                if geographic_analysis:
-                    # IP Geolocation Summary
-                    if 'ip_geolocation' in geographic_analysis:
-                        st.write("**📍 IP Geolocation Summary**")
-                        geo = geographic_analysis['ip_geolocation']
-                        
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1:
-                            st.metric("Total IPs", f"{geo.get('total_unique_ips', 0):,}")
-                        with col2:
-                            st.metric("Successful Lookups", f"{geo.get('successful_lookups', 0):,}")
-                        with col3:
-                            st.metric("Failed Lookups", f"{geo.get('failed_lookups', 0):,}")
-                        with col4:
-                            st.metric("Success Rate", f"{geo.get('success_rate', 0):.1%}")
-                    
-                    # Geographic Transaction Patterns
-                    if 'geographic_patterns' in geographic_analysis:
-                        st.write("**🌐 Geographic Transaction Patterns**")
-                        patterns = geographic_analysis['geographic_patterns']
-                        
-                        if 'country_analysis' in patterns:
-                            st.write("**Country-Level Analysis**")
-                            country_data = patterns['country_analysis']
-                            safe_dataframe_display(country_data, max_rows=15)
-                    
-                    # Suspicious Regional Activity
-                    if 'suspicious_regional_activity' in geographic_analysis:
-                        st.write("**🚨 Suspicious Regional Activity Detection**")
-                        suspicious = geographic_analysis['suspicious_regional_activity']
-                        
-                        if 'high_risk_regions' in suspicious:
-                            st.write("**High-Risk Regions**")
-                            risk_df = suspicious['high_risk_regions']
-                            if isinstance(risk_df, pd.DataFrame) and not risk_df.empty:
-                                safe_dataframe_display(risk_df, max_rows=10)
-                            else:
-                                st.info("No suspicious regional activity data available")
-                        elif isinstance(suspicious, dict) and 'status' in suspicious:
-                            st.info(f"Suspicious activity analysis: {suspicious['status']}")
-                    
-                    # Cross-Border Analysis
-                    if 'cross_border_analysis' in geographic_analysis:
-                        st.write("**🌍 Cross-Border Transaction Analysis**")
-                        cross_border = geographic_analysis['cross_border_analysis']
-                        
-                        if 'cross_border_transactions' in cross_border:
-                            st.write("**Cross-Border Transactions**")
-                            cross_df = cross_border['cross_border_transactions']
-                            if isinstance(cross_df, pd.DataFrame) and not cross_df.empty:
-                                safe_dataframe_display(cross_df, max_rows=10)
-                            else:
-                                st.info("No cross-border transaction data available")
-                        elif isinstance(cross_border, dict) and 'status' in suspicious:
-                            st.info(f"Cross-border analysis: {cross_border['status']}")
-                    
-                    # Geographic Risk Scoring
-                    if 'geographic_risk_scoring' in geographic_analysis:
-                        st.write("**🎯 Geographic Risk Scoring**")
-                        risk = geographic_analysis['geographic_risk_scoring']
-                        
-                        if 'risk_scores' in risk:
-                            st.write("**Risk Scores**")
-                            risk_df = risk['risk_scores']
-                            if isinstance(risk_df, pd.DataFrame) and not risk_df.empty:
-                                safe_dataframe_display(risk_df, max_rows=10)
-                            else:
-                                st.info("No geographic risk scoring data available")
-                        elif isinstance(risk, dict) and 'status' in risk:
-                            st.info(f"Geographic risk scoring: {risk['status']}")
-                    
-                    # Geographic Clustering
-                    if 'geographic_clustering' in geographic_analysis:
-                        st.write("**🗺️ Geographic Clustering Analysis**")
-                        clustering = geographic_analysis['geographic_clustering']
-                        
-                        if 'clusters' in clustering:
-                            st.write("**Location Clusters**")
-                            cluster_df = clustering['clusters']
-                            if isinstance(cluster_df, pd.DataFrame) and not cluster_df.empty:
-                                safe_dataframe_display(cluster_df, max_rows=15)
-                            else:
-                                st.info("No geographic clustering data available")
-                        elif isinstance(clustering, dict) and 'status' in clustering:
-                            st.info(f"Geographic clustering: {clustering['status']}")
-                    
-                    # Time-Geographic Correlation
-                    if 'time_geographic_correlation' in geographic_analysis:
-                        st.write("**⏰ Time-Geographic Correlation**")
-                        time_geo = geographic_analysis['time_geographic_correlation']
-                        
-                        if 'correlation_data' in time_geo:
-                            st.write("**Correlation Data**")
-                            time_df = time_geo['correlation_data']
-                            if isinstance(time_df, pd.DataFrame) and not time_df.empty:
-                                safe_dataframe_display(time_df, max_rows=10)
-                            else:
-                                st.info("No time-geographic correlation data available")
-                        elif isinstance(time_geo, dict) and 'status' in time_geo:
-                            st.info(f"Time-geographic correlation: {time_geo['status']}")
-                    
-                    # Generate comprehensive insights report
-                    st.write("**📊 Geographic Intelligence Insights**")
-                    geographic_insights = generate_geographic_insights(geographic_analysis)
-                    st.markdown(geographic_insights)
-                    
-            except Exception as e:
-                st.error(f"Error in geographic intelligence analysis: {str(e)}")
-                st.info("This analysis requires the geographic_intelligence_engine module to be properly configured.")
+            with col3:
+                if 'amount' in df.columns:
+                    st.metric("Total Amount", f"€{df['amount'].sum():,.0f}")
+                    st.metric("Avg Amount", f"€{df['amount'].mean():,.0f}")
+                else:
+                    st.metric("Amount Data", "Not Available")
             
-            # 6. Enhanced Advanced Analytics
-            st.subheader("🚀 Enhanced Advanced Analytics")
-            try:
-                advanced_analyses = run_advanced_analytics(df)
-                
-                if advanced_analyses:
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        if 'temporal_patterns' in advanced_analyses:
-                            st.write("**Temporal Patterns**")
-                            temp_data = advanced_analyses['temporal_patterns']
-                            if isinstance(temp_data, pd.DataFrame) and not temp_data.empty:
-                                safe_dataframe_display(temp_data, max_rows=10)
-                            else:
-                                st.info("No temporal patterns data available")
-                        
-                        if 'anomaly_detection' in advanced_analyses:
-                            st.write("**Anomaly Detection Results**")
-                            anomaly_data = advanced_analyses['anomaly_detection']
-                            if isinstance(anomaly_data, pd.DataFrame) and not anomaly_data.empty:
-                                safe_dataframe_display(anomaly_data, max_rows=10)
-                            else:
-                                st.info("No anomalies detected or insufficient data for analysis.")
-                    
-                    with col2:
-                        if 'user_risk_profiles' in advanced_analyses:
-                            st.write("**User Risk Profiles**")
-                            risk_data = advanced_analyses['user_risk_profiles']
-                            if isinstance(risk_data, pd.DataFrame) and not risk_data.empty:
-                                st.dataframe(risk_data.head(10))
-                            else:
-                                st.info("No user risk profiles available.")
-                        
-                        if 'data_quality_metrics' in advanced_analyses:
-                            st.write("**Data Quality Metrics**")
-                            quality_data = advanced_analyses['data_quality_metrics']
-                            if isinstance(quality_data, dict):
-                                quality_df = pd.DataFrame(list(quality_data.items()), columns=['Metric', 'Value'])
-                                st.dataframe(quality_df)
-                            else:
-                                st.dataframe(quality_data)
-                
-                # Display advanced analytics insights
-                if advanced_analyses:
-                    advanced_insights = generate_insights_and_logic("Advanced Analytics", df, advanced_analyses)
-                    st.markdown(advanced_insights)
-                    
-            except Exception as e:
-                st.error(f"Error in advanced analytics: {str(e)}")
-                st.info("This analysis requires the advanced_analytics_engine module to be properly configured.")
+            # Show data preview
+            with st.expander("📋 Data Preview", expanded=False):
+                st.dataframe(safe_dataframe_display(df.head(10)), use_container_width=True)
             
-            # 7. Enhanced Fraud Detection & Risk Analysis
-            st.subheader("🕵️ Enhanced Fraud Detection & Risk Analysis")
-            try:
-                # Import and run enhanced fraud detection functions without Streamlit config
-                import enhanced_fraud_detection_app as fraud_module
-                
-                # Create a wrapper function that doesn't call Streamlit config
-                def calculate_risk_scores_wrapper(df, ipinfo_reader=None):
-                    """Wrapper to calculate risk scores without Streamlit conflicts"""
-                    try:
-                        # Call the function directly from the module
-                        if hasattr(fraud_module, 'calculate_risk_scores'):
-                            return fraud_module.calculate_risk_scores(df, ipinfo_reader)
-                        else:
-                            # Fallback: create basic risk scoring
-                            risk_df = df.copy()
-                            risk_df['risk_score'] = 0.0
-                            
-                            # Basic risk factors
-                            if 'amount' in risk_df.columns:
-                                risk_df.loc[risk_df['amount'] > risk_df['amount'].quantile(0.95), 'risk_score'] += 1.0
-                            
-                            if 'ip_address' in risk_df.columns:
-                                ip_counts = risk_df['ip_address'].value_counts()
-                                risk_df.loc[risk_df['ip_address'].map(ip_counts) > 5, 'risk_score'] += 1.0
-                            
-                            if 'billing_country' in risk_df.columns and 'bin_country_iso' in risk_df.columns:
-                                risk_df.loc[risk_df['billing_country'] != risk_df['bin_country_iso'], 'risk_score'] += 1.0
-                            
-                            return risk_df
-                    except Exception as e:
-                        st.warning(f"Risk scoring error: {str(e)}")
-                        return pd.DataFrame()
-                
-                # Calculate comprehensive risk scores
-                risk_df = calculate_risk_scores_wrapper(df, None)
-                
-                if not risk_df.empty:
-                    # Display risk score distribution
-                    st.write("**🎯 Risk Score Distribution**")
-                    col1, col2, col3 = st.columns(3)
-                    
-                    with col1:
-                        high_risk = len(risk_df[risk_df['risk_score'] > 3])
-                        st.metric("High Risk Transactions", f"{high_risk:,}")
-                    
-                    with col2:
-                        medium_risk = len(risk_df[(risk_df['risk_score'] > 1) & (risk_df['risk_score'] <= 3)])
-                        st.metric("Medium Risk Transactions", f"{medium_risk:,}")
-                    
-                    with col3:
-                        low_risk = len(risk_df[risk_df['risk_score'] <= 1])
-                        st.metric("Low Risk Transactions", f"{low_risk:,}")
-                    
-                    # Display high-risk transactions
-                    if high_risk > 0:
-                        st.write("**🚨 High-Risk Transactions (Score > 3)**")
-                        high_risk_df = risk_df[risk_df['risk_score'] > 3].sort_values('risk_score', ascending=False)
-                        safe_dataframe_display(high_risk_df[['amount', 'billing_country', 'ip_address', 'risk_score']].head(10))
-                    
-                    # Risk score vs success rate analysis
-                    st.write("**📊 Risk Score vs Success Rate Analysis**")
-                    risk_success = risk_df.groupby(pd.cut(risk_df['risk_score'], bins=[0, 1, 2, 3, 5], labels=['Low', 'Medium', 'High', 'Very High']))['is_successful'].agg(['mean', 'count'])
-                    risk_success['success_rate_pct'] = (risk_success['mean'] * 100).round(1)
-                    safe_dataframe_display(risk_success)
-                    
-            except Exception as e:
-                st.warning(f"Enhanced fraud detection not available: {str(e)}")
-                st.info("This feature requires the enhanced_fraud_detection_app module.")
-            
-            # 8. Comprehensive Payment Pattern Analysis
-            st.subheader("💳 Comprehensive Payment Pattern Analysis")
-            try:
-                # Import and run comprehensive payment analysis functions without Streamlit config
-                import comprehensive_payment_analysis as payment_module
-                
-                # Create wrapper functions that don't call Streamlit config
-                def analyze_payment_success_patterns_wrapper(df):
-                    """Wrapper to analyze payment success patterns without Streamlit conflicts"""
-                    try:
-                        if hasattr(payment_module, 'analyze_payment_success_patterns'):
-                            return payment_module.analyze_payment_success_patterns(df)
-                        else:
-                            # Fallback: create basic success pattern analysis
-                            if 'gateway_name' in df.columns:
-                                gateway_success = df.groupby('gateway_name')['is_successful'].agg(['mean', 'count']).round(3)
-                                gateway_success['success_rate_pct'] = (gateway_success['mean'] * 100).round(1)
-                                return {'gateway_success_rates': gateway_success}
-                            return {}
-                    except Exception as e:
-                        st.warning(f"Success pattern analysis error: {str(e)}")
-                        return {}
-                
-                def analyze_failure_patterns_wrapper(df):
-                    """Wrapper to analyze failure patterns without Streamlit conflicts"""
-                    try:
-                        if hasattr(payment_module, 'analyze_failure_patterns'):
-                            return payment_module.analyze_failure_patterns(df)
-                        else:
-                            # Fallback: create basic failure pattern analysis
-                            failed_txns = df[~df['is_successful']]
-                            if not failed_txns.empty:
-                                failure_reasons = failed_txns.groupby('status_title').size().sort_values(ascending=False)
-                                return {'failure_reasons': failure_reasons}
-                            return {}
-                    except Exception as e:
-                        st.warning(f"Failure pattern analysis error: {str(e)}")
-                        return {}
-                
-                def analyze_user_behavior_patterns_wrapper(df):
-                    """Wrapper to analyze user behavior patterns without Streamlit conflicts"""
-                    try:
-                        if hasattr(payment_module, 'analyze_user_behavior_patterns'):
-                            return payment_module.analyze_user_behavior_patterns(df)
-                        else:
-                            # Fallback: create basic user behavior analysis
-                            if 'user_email' in df.columns:
-                                user_segments = df.groupby('user_email').agg({
-                                    'is_successful': ['mean', 'count'],
-                                    'amount': 'mean' if 'amount' in df.columns else 'count'
-                                }).round(3)
-                                user_segments.columns = ['_'.join(col).strip('_') for col in user_segments.columns]
-                                return {'user_segments': user_segments}
-                            return {}
-                    except Exception as e:
-                        st.warning(f"User behavior analysis error: {str(e)}")
-                        return {}
-                
-                def analyze_technical_infrastructure_wrapper(df):
-                    """Wrapper to analyze technical infrastructure without Streamlit conflicts"""
-                    try:
-                        if hasattr(payment_module, 'analyze_technical_infrastructure'):
-                            return payment_module.analyze_technical_infrastructure(df)
-                        else:
-                            # Fallback: create basic technical infrastructure analysis
-                            if 'gateway_name' in df.columns:
-                                gateway_performance = df.groupby('gateway_name').agg({
-                                    'is_successful': ['mean', 'count'],
-                                    'processing_time': 'mean' if 'processing_time' in df.columns else 'count'
-                                }).round(3)
-                                gateway_performance.columns = ['_'.join(col).strip('_') for col in gateway_performance.columns]
-                                return {'gateway_performance': gateway_performance}
-                            return {}
-                    except Exception as e:
-                        st.warning(f"Technical infrastructure analysis error: {str(e)}")
-                        return {}
-                
-                # Payment Success Patterns
-                st.write("**✅ Payment Success Pattern Analysis**")
-                success_patterns = analyze_payment_success_patterns_wrapper(df)
-                if success_patterns and 'gateway_success_rates' in success_patterns:
-                    safe_dataframe_display(success_patterns['gateway_success_rates'].head(10))
-                
-                # Failure Pattern Analysis
-                st.write("**❌ Payment Failure Pattern Analysis**")
-                failure_patterns = analyze_failure_patterns_wrapper(df)
-                if failure_patterns and 'failure_reasons' in failure_patterns:
-                    safe_dataframe_display(failure_patterns['failure_reasons'].head(10))
-                
-                # User Behavior Patterns
-                st.write("**👤 User Behavior Pattern Analysis**")
-                user_patterns = analyze_user_behavior_patterns_wrapper(df)
-                if user_patterns and 'user_segments' in user_patterns:
-                    safe_dataframe_display(user_patterns['user_segments'].head(10))
-                
-                # Technical Infrastructure Analysis
-                st.write("**🔧 Technical Infrastructure Analysis**")
-                tech_analysis = analyze_technical_infrastructure_wrapper(df)
-                if tech_analysis and 'gateway_performance' in tech_analysis:
-                    safe_dataframe_display(tech_analysis['gateway_performance'].head(10))
-                    
-            except Exception as e:
-                st.warning(f"Comprehensive payment analysis not available: {str(e)}")
-                st.info("This feature requires the comprehensive_payment_analysis module.")
-            
-            # 9. Enhanced Geographic Analysis with IPinfo
-            st.subheader("🌍 Enhanced Geographic Analysis with IPinfo")
-            try:
-                # Import and run enhanced geographic analysis functions without Streamlit config
-                import enhanced_geographic_analysis as geo_module
-                
-                # Create wrapper functions that don't call Streamlit config
-                def enhance_with_ipinfo_wrapper(df, ipinfo_reader=None):
-                    """Wrapper to enhance data with IPinfo without Streamlit conflicts"""
-                    try:
-                        if hasattr(geo_module, 'enhance_with_ipinfo'):
-                            return geo_module.enhance_with_ipinfo(df, ipinfo_reader)
-                        else:
-                            # Fallback: create basic IP enhancement
-                            enhanced_df = df.copy()
-                            if 'ip_address' in enhanced_df.columns:
-                                # Use our existing IPinfo geolocator
-                                geolocator = init_ipinfo_geolocator()
-                                if geolocator:
-                                    enhanced_df['ip_country'] = enhanced_df['ip_address'].apply(
-                                        lambda x: geolocator.get_country(x) if pd.notna(x) else 'Unknown'
-                                    )
-                                else:
-                                    enhanced_df['ip_country'] = 'Unknown'
-                            return enhanced_df
-                    except Exception as e:
-                        st.warning(f"IP enhancement error: {str(e)}")
-                        return df
-                
-                def calculate_geo_risk_scores_wrapper(df):
-                    """Wrapper to calculate geographic risk scores without Streamlit conflicts"""
-                    try:
-                        if hasattr(geo_module, 'calculate_risk_scores'):
-                            return geo_module.calculate_risk_scores(df)
-                        else:
-                            # Fallback: create basic geographic risk scoring
-                            risk_df = df.copy()
-                            risk_df['geographic_risk_score'] = 0.0
-                            
-                            # Geographic risk factors
-                            if 'ip_country' in risk_df.columns and 'billing_country' in risk_df.columns:
-                                risk_df.loc[risk_df['ip_country'] != risk_df['billing_country'], 'geographic_risk_score'] += 2.0
-                            
-                            if 'ip_country' in risk_df.columns:
-                                high_risk_countries = ['XX', 'YY']  # Placeholder
-                                risk_df.loc[risk_df['ip_country'].isin(high_risk_countries), 'geographic_risk_score'] += 1.0
-                            
-                            return risk_df
-                    except Exception as e:
-                        st.warning(f"Geographic risk scoring error: {str(e)}")
-                        return df
-                
-                # Enhanced IP geolocation analysis
-                st.write("**📍 Enhanced IP Geolocation Analysis**")
-                enhanced_df = enhance_with_ipinfo_wrapper(df, None)
-                
-                if not enhanced_df.empty and 'ip_country' in enhanced_df.columns:
-                    # Geographic distribution
-                    geo_dist = enhanced_df['ip_country'].value_counts().head(10)
-                    st.write("**Top 10 Countries by IP Address**")
-                    safe_dataframe_display(geo_dist.reset_index().rename(columns={'index': 'Country', 'ip_country': 'Count'}))
-                    
-                    # Cross-border analysis
-                    if 'billing_country' in enhanced_df.columns:
-                        cross_border = enhanced_df[enhanced_df['ip_country'] != enhanced_df['billing_country']]
-                        if not cross_border.empty:
-                            st.write(f"**🌐 Cross-Border Transactions: {len(cross_border):,}**")
-                            cross_border_summary = cross_border.groupby(['ip_country', 'billing_country']).size().sort_values(ascending=False).head(10)
-                            safe_dataframe_display(cross_border_summary.reset_index().rename(columns={0: 'Count'}))
-                
-                # Geographic risk scoring
-                st.write("**🎯 Geographic Risk Scoring**")
-                geo_risk_df = calculate_geo_risk_scores_wrapper(enhanced_df)
-                if not geo_risk_df.empty and 'geographic_risk_score' in geo_risk_df.columns:
-                    high_geo_risk = len(geo_risk_df[geo_risk_df['geographic_risk_score'] > 3])
-                    st.metric("High Geographic Risk Transactions", f"{high_geo_risk:,}")
-                    
-                    if high_geo_risk > 0:
-                        st.write("**🚨 High Geographic Risk Transactions**")
-                        high_geo_df = geo_risk_df[geo_risk_df['geographic_risk_score'] > 3].sort_values('geographic_risk_score', ascending=False)
-                        safe_dataframe_display(high_geo_df[['amount', 'ip_country', 'billing_country', 'geographic_risk_score']].head(10))
-                        
-            except Exception as e:
-                st.warning(f"Enhanced geographic analysis not available: {str(e)}")
-                st.info("This feature requires the enhanced_geographic_analysis module.")
-            
-            # 10. Enhanced Charts & Visualizations
-            st.subheader("📊 Enhanced Visualizations & Charts")
-            try:
-                # Create charts using all available analysis results
-                all_analyses = {
-                    'geo_analysis': geo_analysis,
-                    'user_analysis': user_analysis,
-                    'payment_analysis': payment_analysis,
-                    'temporal_analysis': temporal_analysis
-                }
-                
-                charts = create_enhanced_charts(df, all_analyses)
-                
-                # Display charts in organized layout
-                if charts:
-                    # Geographic charts
-                    if 'geographic_success' in charts:
-                        st.subheader("🌍 Geographic Analysis Charts")
-                        st.plotly_chart(charts['geographic_success'], use_container_width=True)
-                    
-                    if 'bin_ip_correlation' in charts:
-                        st.plotly_chart(charts['bin_ip_correlation'], use_container_width=True)
-                    
-                    # User behavior charts
-                    if 'user_risk_segments' in charts:
-                        st.subheader("👤 User Behavior Charts")
-                        st.plotly_chart(charts['user_risk_segments'], use_container_width=True)
-                    
-                    # Temporal charts
-                    if 'hourly_success' in charts:
-                        st.subheader("⏰ Temporal Analysis Charts")
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.plotly_chart(charts['hourly_success'], use_container_width=True)
-                        with col2:
-                            if 'hourly_volume' in charts:
-                                st.plotly_chart(charts['hourly_volume'], use_container_width=True)
-                    
-                    if 'day_of_week_performance' in charts:
-                        st.plotly_chart(charts['day_of_week_performance'], use_container_width=True)
-                    
-                    # Payment method charts
-                    if 'gateway_performance' in charts:
-                        st.subheader("💳 Payment Method Charts")
-                        st.plotly_chart(charts['gateway_performance'], use_container_width=True)
-                
-            except Exception as e:
-                st.error(f"Error creating charts: {str(e)}")
-                st.info("Some charts may not be available due to missing data or analysis results.")
-            
+            # Run all analyses using the loaded data
+            run_comprehensive_analysis(df, ipinfo_geolocator)
         else:
-            st.error("❌ Failed to load data. Please check your CSV file format.")
+            st.warning("No data available for analysis")
+    
+    else:
+        st.info("💡 Загрузите CSV для начала анализа.")
+        st.markdown("""
+        **Правила:**
+        - Успех = `status_title` ≠ 'Failed' **и** `is_final` == TRUE
+        - Анализ строится только по финальным записям
+        - GEO источники: BIN / Billing / Shipping / IP
+        - IP-страна — из локальной базы IPinfo MMDB (если загружена) или из `ip_map.csv`
+        - Фокус: Австралия (AU), Германия (DE), Италия (IT), Венгрия (HU) — по умолчанию; можно переключить страны
+        """)
+
+def run_comprehensive_analysis(df, ipinfo_geolocator):
+    """Run all analysis modules using the loaded data"""
+    
+    st.header("🔍 Comprehensive Analysis Results")
+    
+    # Create tabs for different analysis sections
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "📊 Basic Analytics", 
+        "🕵️ Fraud Detection", 
+        "🌍 Geographic Intelligence",
+        "📱 Body Content Analysis",
+        "💳 Payment Patterns",
+        "📈 Advanced Analytics"
+    ])
+    
+    with tab1:
+        st.subheader("📊 Basic Transaction Analytics")
+        run_basic_analytics(df)
+    
+    with tab2:
+        st.subheader("🕵️ Enhanced Fraud Detection & Risk Analysis")
+        run_enhanced_fraud_detection(df, ipinfo_geolocator)
+    
+    with tab3:
+        st.subheader("🌍 Geographic Intelligence Analysis")
+        run_geographic_intelligence_analysis(df, ipinfo_geolocator)
+    
+    with tab4:
+        st.subheader("📱 Enhanced Advanced Body Content Analysis")
+        run_advanced_body_analysis(df)
+    
+    with tab5:
+        st.subheader("💳 Comprehensive Payment Pattern Analysis")
+        run_comprehensive_payment_analysis(df, ipinfo_geolocator)
+    
+    with tab6:
+        st.subheader("📈 Advanced Analytics & Machine Learning")
+        run_advanced_analytics(df)
+
+def run_basic_analytics(df):
+    """Run basic transaction analytics"""
+    try:
+        # Basic statistics
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if 'amount' in df.columns:
+                st.metric("Total Amount", f"€{df['amount'].sum():,.0f}")
+                st.metric("Average Amount", f"€{df['amount'].mean():,.2f}")
+                st.metric("Min Amount", f"€{df['amount'].min():,.2f}")
+                st.metric("Max Amount", f"€{df['amount'].max():,.2f}")
+        
+        with col2:
+            if 'gateway_name' in df.columns:
+                gateway_stats = df.groupby('gateway_name').agg({
+                    'id': 'count',
+                    'is_successful': 'mean' if 'is_successful' in df.columns else 'count'
+                }).round(3)
+                st.write("**Gateway Statistics:**")
+                st.dataframe(safe_dataframe_display(gateway_stats), use_container_width=True)
+        
+        with col3:
+            if 'created_at' in df.columns:
+                df['created_at'] = pd.to_datetime(df['created_at'], errors='coerce')
+                hourly_stats = df.groupby(df['created_at'].dt.hour).size()
+                st.write("**Hourly Distribution:**")
+                st.bar_chart(hourly_stats)
+        
+    except Exception as e:
+        st.error(f"Error in basic analytics: {e}")
+
+def run_enhanced_fraud_detection(df, ipinfo_geolocator):
+    """Run enhanced fraud detection analysis"""
+    try:
+        # Calculate risk scores
+        risk_scores = calculate_risk_scores(df)
+        
+        # Generate fraud report
+        fraud_report = generate_fraud_report(df, risk_scores)
+        
+        # Display results
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**Risk Score Distribution:**")
+            if 'risk_score' in df.columns:
+                fig = px.histogram(df, x='risk_score', title="Risk Score Distribution")
+                st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            st.write("**High-Risk Transactions:**")
+            high_risk = df[df.get('risk_score', 0) >= 5] if 'risk_score' in df.columns else df.head(0)
+            if len(high_risk) > 0:
+                st.dataframe(safe_dataframe_display(high_risk[['id', 'amount', 'risk_score']].head(10)), use_container_width=True)
+            else:
+                st.info("No high-risk transactions found")
+        
+    except Exception as e:
+        st.error(f"Enhanced fraud detection not available: {e}")
+
+def run_geographic_intelligence_analysis(df, ipinfo_geolocator):
+    """Run geographic intelligence analysis"""
+    try:
+        # Prepare data for geographic analysis
+        geo_df = prepare_data_for_geographic_analysis(df, ipinfo_geolocator)
+        
+        # Run geographic analysis
+        geo_analysis = run_geographic_intelligence_analysis(geo_df, ipinfo_geolocator)
+        
+        # Generate insights
+        geo_insights = generate_geographic_insights(geo_analysis)
+        
+        # Display results
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**Geographic Patterns:**")
+            if isinstance(geo_insights, dict) and 'country_success' in geo_insights:
+                st.dataframe(safe_dataframe_display(geo_insights['country_success']), use_container_width=True)
+        
+        with col2:
+            st.write("**IP Geolocation Summary:**")
+            if 'ip_country' in geo_df.columns:
+                ip_country_stats = geo_df['ip_country'].value_counts().head(10)
+                st.dataframe(safe_dataframe_display(ip_country_stats), use_container_width=True)
+        
+    except Exception as e:
+        st.error(f"Geographic intelligence analysis not available: {e}")
+
+def run_advanced_body_analysis(df):
+    """Run advanced body content analysis"""
+    try:
+        # Run body analysis
+        body_analysis = run_advanced_body_analysis(df)
+        
+        # Create visualizations
+        body_charts = create_body_analysis_visualizations(body_analysis)
+        
+        # Display results
+        st.write("**Body Content Analysis Results:**")
+        
+        if isinstance(body_analysis, dict):
+            for key, value in body_analysis.items():
+                if isinstance(value, pd.DataFrame) and len(value) > 0:
+                    st.write(f"**{key}:**")
+                    st.dataframe(safe_dataframe_display(value.head(10)), use_container_width=True)
+        
+        # Display charts
+        if body_charts:
+            for chart_name, chart in body_charts.items():
+                st.plotly_chart(chart, use_container_width=True)
+        
+    except Exception as e:
+        st.error(f"Advanced body analysis not available: {e}")
+
+def run_comprehensive_payment_analysis(df, ipinfo_geolocator):
+    """Run comprehensive payment pattern analysis"""
+    try:
+        # Analyze payment success patterns
+        success_patterns = analyze_payment_success_patterns(df)
+        
+        # Analyze failure patterns
+        failure_patterns = analyze_failure_patterns(df)
+        
+        # Analyze user behavior patterns
+        user_behavior = analyze_user_behavior_patterns(df)
+        
+        # Analyze technical infrastructure
+        tech_infrastructure = analyze_technical_infrastructure(df)
+        
+        # Display results
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**Payment Success Patterns:**")
+            if isinstance(success_patterns, dict) and 'overall_success_rate' in success_patterns:
+                st.metric("Overall Success Rate", f"{success_patterns['overall_success_rate']:.1%}")
+        
+        with col2:
+            st.write("**User Behavior Patterns:**")
+            if isinstance(user_behavior, dict) and 'user_patterns' in user_behavior:
+                st.dataframe(safe_dataframe_display(user_behavior['user_patterns'].head(10)), use_container_width=True)
+        
+    except Exception as e:
+        st.error(f"Comprehensive payment analysis not available: {e}")
+
+def run_advanced_analytics(df):
+    """Run advanced analytics and machine learning"""
+    try:
+        # Run advanced analytics
+        advanced_results = run_advanced_analytics(df)
+        
+        # Display results
+        if isinstance(advanced_results, dict):
+            for key, value in advanced_results.items():
+                if isinstance(value, pd.DataFrame) and len(value) > 0:
+                    st.write(f"**{key}:**")
+                    st.dataframe(safe_dataframe_display(value.head(10)), use_container_width=True)
+                elif isinstance(value, (int, float, str)):
+                    st.metric(key, value)
+        
+    except Exception as e:
+        st.error(f"Advanced analytics not available: {e}")
 
 if __name__ == "__main__":
     main()

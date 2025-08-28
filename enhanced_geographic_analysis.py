@@ -23,12 +23,12 @@ except ImportError:
     IPINFO_AVAILABLE = False
     st.warning("IPinfo packages not available. Install with: pip install geoip2 maxminddb")
 
-st.set_page_config(
-    page_title="Enhanced Geographic Analysis with IPinfo",
-    page_icon="🌍",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# st.set_page_config(  # Commented out to avoid conflicts
+#     page_title="Enhanced Geographic Analysis with IPinfo",
+#     page_icon="🌍",
+#     layout="wide",
+#     initial_sidebar_state="expanded"
+# )
 
 st.title("🌍 Enhanced Geographic Analysis with IPinfo Database")
 st.caption("""

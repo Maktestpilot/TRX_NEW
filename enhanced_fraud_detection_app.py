@@ -22,7 +22,7 @@ try:
 except Exception:
     IPinfoMMDBReader = None
 
-st.set_page_config(page_title="Fraud & Pass-through Analytics (AU/DE/IT/HU)", layout="wide")
+# st.set_page_config(page_title="Fraud & Pass-through Analytics (AU/DE/IT/HU)", layout="wide")  # Commented out to avoid conflicts
 st.title("Проходимость и причины отказов — локальная аналитика")
 
 st.caption("""

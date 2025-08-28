@@ -24,12 +24,12 @@ except ImportError:
     IPINFO_AVAILABLE = False
     st.warning("IPinfo packages not available. Install with: pip install maxminddb")
 
-st.set_page_config(
-    page_title="Comprehensive Payment Analysis Dashboard",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# st.set_page_config(  # Commented out to avoid conflicts
+#     page_title="Comprehensive Payment Analysis Dashboard",
+#     page_icon="📊",
+#     layout="wide",
+#     initial_sidebar_state="expanded"
+# )
 
 # ---------- Configuration ----------
 
