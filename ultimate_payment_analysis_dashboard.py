@@ -103,8 +103,8 @@ def load_and_process_data(df, ip_mapping_file=None, mmdb_file=None, ipinfo_geolo
             df['updated_at'] = pd.to_datetime(df['updated_at'])
             df['processing_time'] = (df['updated_at'] - df['created_at']).dt.total_seconds()
         elif 'created_at' in df.columns:
-            # If only created_at exists, create a dummy processing_time column
-            df['processing_time'] = np.random.uniform(1, 30, len(df))  # Random values for testing
+            # If only created_at exists, set processing_time to None to indicate missing data
+            df['processing_time'] = pd.NaT  # Not a Time - indicates missing data
         
         # Enrich with IP geolocation if available
         if ipinfo_geolocator and 'ip_address' in df.columns:
@@ -112,40 +112,18 @@ def load_and_process_data(df, ip_mapping_file=None, mmdb_file=None, ipinfo_geolo
             df['ip_country_name'] = df['ip_address'].apply(lambda x: ipinfo_geolocator.get_country_name(x) if pd.notna(x) else 'Unknown')
             df['ip_asn'] = df['ip_address'].apply(lambda x: ipinfo_geolocator.get_asn(x) if pd.notna(x) else 'Unknown')
         
+        # CRITICAL: Add IP vs BIN country analysis
+        df = analyze_ip_bin_country_relationship(df)
+        
+        # CRITICAL: Add data quality analysis
+        df = analyze_body_data_quality(df)
+        
         return df
     except Exception as e:
         st.error(f"Error processing file: {str(e)}")
         return pd.DataFrame()
 
-def extract_ip_from_json(body_str: str) -> str:
-    """Extract IP address from JSON body string"""
-    try:
-        if pd.isna(body_str) or not isinstance(body_str, str):
-            return None
-        
-        # Try to parse JSON
-        body_data = json.loads(body_str)
-        
-        # Look for IP address in common fields
-        ip_fields = ['ip', 'ip_address', 'client_ip', 'remote_ip', 'user_ip', 'visitor_ip']
-        for field in ip_fields:
-            if field in body_data and body_data[field]:
-                return str(body_data[field])
-        
-        # Look for IP in nested structures
-        if 'client' in body_data and isinstance(body_data['client'], dict):
-            for field in ip_fields:
-                if field in body_data['client'] and body_data['client'][field]:
-                    return str(body_data['client'][field])
-        
-        if 'request' in body_data and isinstance(body_data['request'], dict):
-            for field in ip_fields:
-                if field in body_data['request'] and body_data['request'][field]:
-                    return str(body_data['request'][field])
-        
-        return None
-    except (json.JSONDecodeError, KeyError, TypeError):
-        return None
+
 
 def parse_body_json(df: pd.DataFrame) -> pd.DataFrame:
     """Parse JSON data from body column and extract useful information"""
@@ -178,13 +156,32 @@ def parse_body_json(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
 def extract_ip_from_json(body_str: str) -> Optional[str]:
-    """Extract IP address from JSON body"""
+    """Extract IP address from JSON body with enhanced error handling"""
     try:
-        if pd.isna(body_str):
+        if pd.isna(body_str) or not isinstance(body_str, str):
             return None
-        body_data = json.loads(body_str) if isinstance(body_str, str) else body_str
-        return body_data.get('ip', body_data.get('ipAddress', None))
-    except:
+        
+        # Try to parse JSON
+        body_data = json.loads(body_str)
+        
+        # Look for IP address in common fields
+        ip_fields = ['ip', 'ip_address', 'client_ip', 'remote_ip', 'user_ip', 'visitor_ip', 'x_forwarded_for', 'x_real_ip']
+        for field in ip_fields:
+            if field in body_data and body_data[field]:
+                return str(body_data[field])
+        
+        # Look for IP in nested structures
+        for parent_key in ['client', 'request', 'headers', 'user']:
+            if parent_key in body_data and isinstance(body_data[parent_key], dict):
+                for field in ip_fields:
+                    if field in body_data[parent_key] and body_data[parent_key][field]:
+                        return str(body_data[parent_key][field])
+        
+        return None
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        # Log the error for debugging
+        import logging
+        logging.warning(f"Error extracting IP from JSON: {e}")
         return None
 
 def extract_browser_info(body_str: str, field: str) -> Optional[str]:
@@ -195,7 +192,9 @@ def extract_browser_info(body_str: str, field: str) -> Optional[str]:
         body_data = json.loads(body_str) if isinstance(body_str, str) else body_str
         browser = body_data.get('browser', {})
         return browser.get(field, None)
-    except:
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        import logging
+        logging.warning(f"Error extracting browser info for field '{field}': {e}")
         return None
 
 def extract_card_info(body_str: str, field: str) -> Optional[str]:
@@ -206,8 +205,188 @@ def extract_card_info(body_str: str, field: str) -> Optional[str]:
         body_data = json.loads(body_str) if isinstance(body_str, str) else body_str
         card = body_data.get('card', {})
         return card.get(field, None)
-    except:
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        import logging
+        logging.warning(f"Error extracting card info for field '{field}': {e}")
         return None
+
+def analyze_ip_bin_country_relationship(df: pd.DataFrame) -> pd.DataFrame:
+    """CRITICAL: Analyze relationship between IP country and BIN country for fraud detection"""
+    try:
+        # Ensure required columns exist
+        if 'ip_country' not in df.columns or 'bin_country_iso' not in df.columns:
+            return df
+        
+        # Create IP vs BIN country match indicator
+        df['ip_bin_country_match'] = df['ip_country'] == df['bin_country_iso']
+        
+        # Calculate geographic risk score
+        df['geo_risk_score'] = calculate_geographic_risk_score(df)
+        
+        # Add cross-border transaction indicator
+        df['is_cross_border'] = ~df['ip_bin_country_match']
+        
+        return df
+    except Exception as e:
+        import logging
+        logging.warning(f"Error in IP vs BIN analysis: {e}")
+        return df
+
+def calculate_geographic_risk_score(df: pd.DataFrame) -> pd.Series:
+    """Calculate geographic risk score based on IP vs BIN country mismatch"""
+    risk_scores = []
+    
+    for _, row in df.iterrows():
+        score = 0
+        
+        # Base risk for country mismatch
+        if row.get('ip_country') != row.get('bin_country_iso'):
+            score += 3.0
+            
+            # Additional risk for specific high-risk combinations
+            ip_country = row.get('ip_country', '')
+            bin_country = row.get('bin_country_iso', '')
+            
+            # High-risk combinations (configurable)
+            high_risk_combinations = [
+                (['US', 'CA'], ['RU', 'CN', 'IR']),
+                (['RU', 'CN'], ['US', 'CA', 'EU']),
+                (['EU'], ['RU', 'CN', 'IR'])
+            ]
+            
+            for ip_list, bin_list in high_risk_combinations:
+                if ip_country in ip_list and bin_country in bin_list:
+                    score += 2.0
+                    break
+        
+        # Risk for high-risk countries (configurable)
+        high_risk_countries = ['XX', 'YY', 'ZZ']  # Replace with actual high-risk country codes
+        if row.get('ip_country') in high_risk_countries:
+            score += 2.0
+        if row.get('bin_country_iso') in high_risk_countries:
+            score += 1.5
+        
+        # Normalize to 0-10 scale
+        risk_scores.append(min(score, 10.0))
+    
+    return pd.Series(risk_scores, index=df.index)
+
+def analyze_body_data_quality(df: pd.DataFrame) -> pd.DataFrame:
+    """CRITICAL: Analyze quality of data in BODY column"""
+    try:
+        # IP address quality analysis
+        if 'ip_address' in df.columns:
+            df['ip_is_valid'] = df['ip_address'].apply(is_valid_ip_address)
+            df['ip_is_private'] = df['ip_address'].apply(is_private_ip_address)
+            df['ip_quality_score'] = calculate_ip_quality_score(df)
+        
+        # Browser data quality analysis
+        if 'browser_user_agent' in df.columns:
+            df['is_suspicious_user_agent'] = df['browser_user_agent'].apply(detect_suspicious_user_agent)
+        
+        # Screen resolution quality analysis
+        if 'browser_screen_width' in df.columns and 'browser_screen_height' in df.columns:
+            df['is_unusual_resolution'] = detect_unusual_screen_resolution(df)
+        
+        # Overall data quality score
+        df['data_quality_score'] = calculate_overall_data_quality_score(df)
+        
+        return df
+    except Exception as e:
+        import logging
+        logging.warning(f"Error in data quality analysis: {e}")
+        return df
+
+def is_valid_ip_address(ip: str) -> bool:
+    """Check if IP address is valid"""
+    import re
+    if pd.isna(ip) or not isinstance(ip, str):
+        return False
+    
+    # IPv4 pattern
+    ipv4_pattern = r'^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'
+    return bool(re.match(ipv4_pattern, ip))
+
+def is_private_ip_address(ip: str) -> bool:
+    """Check if IP address is private"""
+    if not is_valid_ip_address(ip):
+        return False
+    
+    ip_parts = str(ip).split('.')
+    if len(ip_parts) != 4:
+        return False
+    
+    first_octet = int(ip_parts[0])
+    second_octet = int(ip_parts[1])
+    
+    return (
+        first_octet == 10 or  # 10.0.0.0/8
+        (first_octet == 172 and 16 <= second_octet <= 31) or  # 172.16.0.0/12
+        (first_octet == 192 and second_octet == 168) or  # 192.168.0.0/16
+        first_octet == 127  # 127.0.0.0/8 (loopback)
+    )
+
+def calculate_ip_quality_score(df: pd.DataFrame) -> pd.Series:
+    """Calculate IP quality score"""
+    scores = []
+    for _, row in df.iterrows():
+        score = 0
+        if row.get('ip_is_valid', False):
+            score += 5
+        if not row.get('ip_is_private', False):
+            score += 3
+        if pd.notna(row.get('ip_address')):
+            score += 2
+        scores.append(score)
+    return pd.Series(scores, index=df.index)
+
+def detect_suspicious_user_agent(user_agent: str) -> bool:
+    """Detect suspicious user agents"""
+    if pd.isna(user_agent):
+        return False
+    
+    suspicious_patterns = [
+        'bot', 'crawler', 'spider', 'scraper', 'headless',
+        'phantom', 'selenium', 'webdriver', 'automation'
+    ]
+    
+    ua_lower = str(user_agent).lower()
+    return any(pattern in ua_lower for pattern in suspicious_patterns)
+
+def detect_unusual_screen_resolution(df: pd.DataFrame) -> pd.Series:
+    """Detect unusual screen resolutions"""
+    unusual_resolutions = [
+        '0x0', '1x1', '100x100', '800x600', '1024x768'
+    ]
+    
+    resolutions = (df['browser_screen_width'].astype(str) + 'x' + 
+                  df['browser_screen_height'].astype(str))
+    
+    return resolutions.isin(unusual_resolutions)
+
+def calculate_overall_data_quality_score(df: pd.DataFrame) -> pd.Series:
+    """Calculate overall data quality score"""
+    scores = []
+    for _, row in df.iterrows():
+        score = 0
+        
+        # IP quality (0-10 points)
+        if row.get('ip_quality_score', 0) >= 8:
+            score += 10
+        elif row.get('ip_quality_score', 0) >= 5:
+            score += 5
+        
+        # Browser quality (0-5 points)
+        if not row.get('is_suspicious_user_agent', False):
+            score += 5
+        
+        # Resolution quality (0-5 points)
+        if not row.get('is_unusual_resolution', False):
+            score += 5
+        
+        scores.append(min(score, 20))  # Max 20 points
+    
+    return pd.Series(scores, index=df.index)
 
 def format_percentage(value: float) -> str:
     """Format decimal value as percentage"""
@@ -275,8 +454,10 @@ def safe_dataframe_display(df, max_rows=10):
             try:
                 # Test if column can be converted to string
                 display_df[col].astype(str)
-            except:
+            except (TypeError, ValueError, AttributeError) as e:
                 # If conversion fails, replace with placeholder
+                import logging
+                logging.warning(f"Error converting column '{col}' to string: {e}")
                 display_df[col] = 'Data Error'
         
         # Limit rows for display
@@ -1342,10 +1523,9 @@ def main():
         ipinfo_geolocator = st.session_state.ipinfo_geolocator
         
         if df is not None and len(df) > 0:
-            # Display data overview
-            # Display data overview
-            st.subheader("📊 Data Overview")
-            col1, col2, col3 = st.columns(3)
+            # Display data overview with CRITICAL conversion metrics
+            st.subheader("📊 Data Overview & Critical Conversion Metrics")
+            col1, col2, col3, col4 = st.columns(4)
             
             with col1:
                 st.metric("Total Transactions", len(df))
@@ -1362,6 +1542,68 @@ def main():
                     st.metric("Avg Amount", f"€{df['amount'].mean():,.0f}")
                 else:
                     st.metric("Amount Data", "Not Available")
+            
+            with col4:
+                # CRITICAL: IP vs BIN country match rate
+                if 'ip_bin_country_match' in df.columns:
+                    match_rate = df['ip_bin_country_match'].mean()
+                    st.metric("IP-BIN Match Rate", f"{match_rate:.1%}")
+                    if match_rate < 0.7:
+                        st.error("⚠️ Low IP-BIN match rate!")
+                else:
+                    st.metric("IP-BIN Match", "Not Available")
+                
+                # CRITICAL: Data quality score
+                if 'data_quality_score' in df.columns:
+                    avg_quality = df['data_quality_score'].mean()
+                    st.metric("Data Quality", f"{avg_quality:.1f}/20")
+                    if avg_quality < 15:
+                        st.warning("⚠️ Low data quality!")
+                else:
+                    st.metric("Data Quality", "Not Available")
+            
+            # CRITICAL: Conversion Impact Analysis
+            if 'ip_bin_country_match' in df.columns and 'is_successful' in df.columns:
+                st.subheader("🚨 Critical Conversion Impact Analysis")
+                
+                # IP vs BIN country impact on conversion
+                conversion_impact = df.groupby('ip_bin_country_match')['is_successful'].agg(['mean', 'count']).round(3)
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.write("**IP-BIN Country Match Impact on Conversion:**")
+                    st.dataframe(conversion_impact)
+                    
+                    if len(conversion_impact) == 2:
+                        match_conversion = conversion_impact.loc[True, 'mean'] if True in conversion_impact.index else 0
+                        mismatch_conversion = conversion_impact.loc[False, 'mean'] if False in conversion_impact.index else 0
+                        conversion_diff = match_conversion - mismatch_conversion
+                        
+                        st.metric(
+                            "Conversion Difference", 
+                            f"{conversion_diff:+.1%}",
+                            help="Positive = matching countries have higher conversion"
+                        )
+                
+                with col2:
+                    # Geographic risk impact
+                    if 'geo_risk_score' in df.columns:
+                        st.write("**Geographic Risk Impact on Conversion:**")
+                        risk_impact = df.groupby(pd.cut(df['geo_risk_score'], bins=[0, 3, 6, 10], labels=['Low', 'Medium', 'High']))['is_successful'].agg(['mean', 'count']).round(3)
+                        st.dataframe(risk_impact)
+                        
+                        # Calculate risk impact
+                        if len(risk_impact) >= 2:
+                            low_risk_conversion = risk_impact.loc['Low', 'mean'] if 'Low' in risk_impact.index else 0
+                            high_risk_conversion = risk_impact.loc['High', 'mean'] if 'High' in risk_impact.index else 0
+                            risk_diff = low_risk_conversion - high_risk_conversion
+                            
+                            st.metric(
+                                "Risk Impact", 
+                                f"{risk_diff:+.1%}",
+                                help="Positive = low risk has higher conversion"
+                            )
             
             # Show data preview
             with st.expander("📋 Data Preview", expanded=False):
